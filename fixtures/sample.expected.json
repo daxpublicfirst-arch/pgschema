@@ -1,0 +1,1 @@
+{"ok":true,"table":"book","rows":[{"author_id":1,"id":1,"published_year":1843,"title":"Notes on the Engine"},{"author_id":2,"id":2,"published_year":1959,"title":"COBOL"}],"row_count":2,"limit":20}
