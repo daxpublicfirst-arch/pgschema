@@ -21,7 +21,10 @@ pgschema describe --dsn 'postgres://ro@127.0.0.1:5432/db?sslmode=disable' --json
 
 ## Setup from a clean checkout
 
-Requires Go >= 1.23 and a PostgreSQL server to talk to (16 is tested).
+Requires Go >= 1.23 and a PostgreSQL server to talk to (15 and 16 are
+tested; 14, 17 and 18 are supported by upstream but untested here —
+see [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the full
+matrix and how to test a new version).
 
 ```sh
 git clone https://github.com/daxpublicfirst-arch/pgschema.git
@@ -29,6 +32,14 @@ cd pgschema
 go build -o bin/pgschema ./cmd/pgschema
 ./bin/pgschema --version        # pgschema 0.1.0
 ./bin/pgschema doctor           # checks the binary
+```
+
+Dependencies are vendored (`vendor/`, committed), so the build works
+fully offline with no module downloads — see
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md#offline-builds-vendored-dependencies):
+
+```sh
+GOPROXY=off GOFLAGS=-mod=vendor go build ./...   # no network, no module cache needed
 ```
 
 Tests need a disposable database and a DSN whose role can `CREATE`
@@ -60,7 +71,8 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO pgschema_ro;
 Every command writes one JSON object to stdout and one telemetry JSON
 line to stderr. `--json` is accepted on every command (output is JSON
 either way, except `--version`, which prints `pgschema 0.1.0` unless
-`--json` is given). `--out <dir>` also writes the same JSON to
+`--json` is given — as `--version --json` or `--json --version`, both
+orders work). `--out <dir>` also writes the same JSON to
 `<dir>/<command>.json`. `--request <path>` reads an adapter envelope
 instead of flags:
 
@@ -80,8 +92,10 @@ pgschema describe --dsn <dsn> [--schema public] [--out <dir>] [--json]
 Lists the tables of one schema with columns (`format_type` types and
 defaults, `""` when there is none), primary keys, foreign keys and
 indexes, sorted deterministically. Reads `information_schema` and
-`pg_catalog` only — no table data. Views and expression-only indexes are
-not listed.
+`pg_catalog` only — no table data. Views, materialized views and
+foreign tables are not listed: only regular and partitioned tables
+are (`relkind 'r'` and `'p'`); expression-only indexes are not listed
+either.
 
 ### `query`
 
@@ -98,13 +112,17 @@ stays null, booleans stay booleans, timestamps become RFC 3339 strings,
 ### `sample`
 
 ```sh
-pgschema sample --dsn <dsn> --table <name> [--limit 20] [--order "id DESC"] [--out <dir>] [--json]
+pgschema sample --dsn <dsn> --table <name> [--schema <name>] [--limit 20] [--order "id DESC"] [--out <dir>] [--json]
 ```
 
-Runs `SELECT * FROM "<table>" LIMIT <n>`. The table name must be a plain
+Runs `SELECT * FROM "<table>" LIMIT <n>`, or
+`SELECT * FROM "<schema>"."<table>" LIMIT <n>` when `--schema` is
+given. Without `--schema` the table is unqualified and resolves on the
+connection's `search_path`. The table name must be a plain
 identifier — dots (schema qualification), quotes, semicolons and
-whitespace are rejected. `ORDER BY` is added only when `--order` is
-given, and `--order` accepts only a comma-separated list of column
+whitespace are rejected — and `--schema` follows the same rule: a
+plain identifier only, anything else is refused with `QUERY_REFUSED`.
+`ORDER BY` is added only when `--order` is given, and `--order` accepts only a comma-separated list of column
 names, each optionally followed by `ASC` or `DESC`.
 
 ### `diff`
@@ -153,6 +171,7 @@ probe. Exits 0 with a working DSN.
 ```sh
 pgschema version [--json]     # pgschema 0.1.0
 pgschema --version            # same
+pgschema --version --json     # {"ok":true,"tool":"pgschema","version":"0.1.0"}
 ```
 
 ## Exit codes
@@ -172,7 +191,9 @@ On failure stdout holds one JSON object:
 
 Error codes: `READ_ONLY_REFUSED` (refused SQL), `QUERY_REFUSED`
 (other refused query, e.g. bad table name or `--order`), `USAGE`,
-`DB_UNREACHABLE`, `TOOL_ERROR`.
+`DB_UNREACHABLE` (connection failure — including a connection/dial
+timeout), `TIMEOUT` (the statement hit the 30s `statement_timeout`),
+`TOOL_ERROR`.
 
 ## Read-only rules
 
@@ -209,13 +230,49 @@ pgschema/
   go.mod
   cmd/pgschema/main.go
   internal/pg/{connect,describe,query,sample,diff,redact,validate,values,selftest}.go
+  internal/pg/*_test.go            # unit tests + benchmarks (bench_test.go)
   internal/cli/cli.go
   schema/{request,response,error,telemetry}.json
   fixtures/{schema,schema_b}.sql  fixtures/{describe,query,sample,diff}.expected.json
   fixtures/refused/delete.sql
+  scripts/perf-test.sh             # large-schema timings (`make perf`)
+  docs/{DESIGN,DECISIONS,COMPATIBILITY,PERFORMANCE,RELEASE}.md
+  docs/ci.yml                  # identical copy of .github/workflows/ci.yml (see below)
+  vendor/                      # vendored dependencies (committed; offline builds)
   plugin.toml  README.md  LICENSE  CHANGELOG.md  Makefile
   .github/workflows/ci.yml
 ```
+
+## Compatibility
+
+| Component | Status |
+|---|---|
+| Go 1.23+ (built with 1.23.0), pgx v5.7.5 | tested |
+| PostgreSQL 15.19, 16.15 | **tested** — full suite, E2E and perf (2026-11-08) |
+| PostgreSQL 14, 17, 18 | supported by upstream, **not tested here** |
+| PostgreSQL 13 and older | not supported (EOL) |
+| linux/amd64 binary | tested natively |
+| linux/arm64 binary | tested under `qemu-aarch64-static` (`make test-arm64`) |
+
+Full evidence and the procedure for testing a new PostgreSQL version:
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+## Testing
+
+```sh
+make check        # gofmt (fails if unformatted) + go vet + go test ./...
+make test-arm64   # arm64 binary under qemu-aarch64-static; skips cleanly without QEMU
+make perf         # timings on a 200-table schema + 100k-row table (needs PGSCHEMA_TEST_DSN)
+make ci           # exactly what CI runs: check + self-test + doctor + release build
+go test -bench=. ./internal/pg/   # benchmarks for ValidateSQL and DiffSchemas
+```
+
+`make ci` needs `PGSCHEMA_TEST_DSN` and `PGSCHEMA_RO_DSN` for its two
+DB steps (in CI the workflow always sets them); without them those two
+steps print a skip message and the rest still runs. Measured timings:
+`describe` on 201 tables takes ~45 ms, `diff` ~100 ms — see
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md). Design and decisions:
+[docs/DESIGN.md](docs/DESIGN.md), [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ## Release
 
@@ -226,6 +283,22 @@ git tag v0.1.0 && git push origin v0.1.0   # CI builds the same artifacts and pu
 
 Binaries are static (`CGO_ENABLED=0`, pgx is pure Go) for linux-amd64
 and linux-arm64. Release artifacts are never committed to git.
+
+Two things to know before tagging (full procedure:
+[docs/RELEASE.md](docs/RELEASE.md)):
+
+- The tag and Release are created from the owner's own checkout — the
+  Muse GitHub App has no create-tag/release tool.
+- `.github/workflows/ci.yml` must be on `main` first: it is validated
+  (`yamllint` and `actionlint` clean) but lives only in the local tree
+  so far, because pushing it needs the GitHub App's separate
+  "Workflows: Read and write" permission. From the owner's checkout:
+  `git add .github/workflows/ci.yml && git commit -m "Add CI"`.
+  Until then, `make ci` is the local equivalent of the CI run.
+  An identical copy is kept at `docs/ci.yml` so the workflow can be
+  reviewed and copied from any checkout (the App cannot push the
+  `.github/workflows/` path); keep the two copies identical —
+  `cmp .github/workflows/ci.yml docs/ci.yml` must print nothing.
 
 ## Notes / corrections
 

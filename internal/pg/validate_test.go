@@ -122,6 +122,30 @@ func TestValidateIdentifier(t *testing.T) {
 	}
 }
 
+func TestValidateSchemaName(t *testing.T) {
+	valid := []string{"public", "audit", "_x", "s1", "My_Schema2"}
+	for _, name := range valid {
+		if err := ValidateSchemaName(name); err != nil {
+			t.Errorf("ValidateSchemaName(%q) should be valid: %v", name, err)
+		}
+	}
+	invalid := []string{
+		"", "my.schema", "s; DROP TABLE t", "s ", " s",
+		"s\"x", "s'x", "s-x", "s/x", "s*",
+		"s\nx", "123abc",
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 64 chars
+	}
+	for _, name := range invalid {
+		if err := ValidateSchemaName(name); err == nil {
+			t.Errorf("ValidateSchemaName(%q) should be invalid", name)
+		}
+	}
+	// The message names the schema, not the table.
+	if err := ValidateSchemaName("bad.name"); err == nil || !strings.Contains(err.Error(), "schema name") {
+		t.Errorf("ValidateSchemaName(%q) error = %v, want it to mention \"schema name\"", "bad.name", err)
+	}
+}
+
 func TestValidateOrderBy(t *testing.T) {
 	valid := []string{"", "  ", "id", "id DESC", "title asc", "id, title DESC", "a, b, c ASC"}
 	for _, o := range valid {

@@ -16,12 +16,20 @@ type SampleResult struct {
 }
 
 // Sample returns up to limit rows from table: SELECT * FROM "table"
-// LIMIT n, with ORDER BY only when order is given. The table name must be
-// a plain identifier (see ValidateIdentifier) and is quoted as an
-// identifier; --order is restricted to plain column names with optional
-// ASC/DESC (see ValidateOrderBy). The caller decides the exit code
-// (0 rows means exit 1, but it is not an error).
-func Sample(ctx context.Context, conn *pgx.Conn, table string, limit int, order string) (*SampleResult, error) {
+// LIMIT n, with ORDER BY only when order is given. When schema is
+// non-empty the table is qualified as "schema"."table"; when it is
+// empty the table is unqualified and resolves on the search_path.
+// Both names must be plain identifiers (see ValidateIdentifier and
+// ValidateSchemaName) and are quoted as identifiers; --order is
+// restricted to plain column names with optional ASC/DESC (see
+// ValidateOrderBy). The caller decides the exit code (0 rows means
+// exit 1, but it is not an error).
+func Sample(ctx context.Context, conn *pgx.Conn, schema, table string, limit int, order string) (*SampleResult, error) {
+	if schema != "" {
+		if err := ValidateSchemaName(schema); err != nil {
+			return nil, err
+		}
+	}
 	if err := ValidateIdentifier(table); err != nil {
 		return nil, err
 	}
@@ -33,6 +41,9 @@ func Sample(ctx context.Context, conn *pgx.Conn, table string, limit int, order 
 	}
 
 	q := "SELECT * FROM " + pgx.Identifier{table}.Sanitize()
+	if schema != "" {
+		q = "SELECT * FROM " + pgx.Identifier{schema, table}.Sanitize()
+	}
 	if strings.TrimSpace(order) != "" {
 		q += " ORDER BY " + strings.TrimSpace(order)
 	}

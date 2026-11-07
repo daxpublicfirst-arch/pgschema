@@ -237,20 +237,76 @@ func formatUUID(b [16]byte) string {
 	return hexStr[0:8] + "-" + hexStr[8:12] + "-" + hexStr[12:16] + "-" + hexStr[16:20] + "-" + hexStr[20:32]
 }
 
+// formatInterval renders a PostgreSQL interval the way PostgreSQL
+// itself renders it with the default (postgres) IntervalStyle:
+// years/months/days plus HH:MM:SS, e.g. "1 year 2 mons 3 days
+// 04:05:06.789", "1 day 02:00:00", "00:00:00" for zero.
+//
+// The rules mirror interval_out in the server, verified against
+// PostgreSQL 16.15:
+//   - Months splits into years (Months/12, truncating toward zero)
+//     and remaining months; each part is rendered only when non-zero.
+//   - Each component keeps its own sign: "1 day -02:00:00" and
+//     "-1 years -2 mons" are real outputs. A component of -1 takes the
+//     plural ("-1 years", "-1 mons", "-1 days") because the server
+//     pluralises on `value != 1`, not on the absolute value.
+//   - The time part is HH:MM:SS with hours unclamped (25:00:00 is
+//     possible), a leading "-" on the whole time when the microseconds
+//     are negative ("-00:30:00"), and a fractional part with trailing
+//     zeros trimmed (".5", ".789", ".000001") only when non-zero.
+//   - The time part is omitted when the microseconds are zero, except
+//     that an all-zero interval renders as "00:00:00".
 func formatInterval(iv pgtype.Interval) string {
 	parts := []string{}
-	if iv.Months != 0 {
-		parts = append(parts, strconv.Itoa(int(iv.Months))+" mons")
+	years := iv.Months / 12
+	mons := iv.Months % 12
+	if years != 0 {
+		parts = append(parts, strconv.Itoa(int(years))+plural(" year", years))
+	}
+	if mons != 0 {
+		parts = append(parts, strconv.Itoa(int(mons))+plural(" mon", mons))
 	}
 	if iv.Days != 0 {
-		parts = append(parts, strconv.Itoa(int(iv.Days))+" days")
+		parts = append(parts, strconv.Itoa(int(iv.Days))+plural(" day", iv.Days))
 	}
 	if iv.Microseconds != 0 {
-		d := time.Duration(iv.Microseconds) * time.Microsecond
-		parts = append(parts, d.String())
+		parts = append(parts, formatIntervalTime(iv.Microseconds))
 	}
 	if len(parts) == 0 {
 		return "00:00:00"
 	}
 	return strings.Join(parts, " ")
+}
+
+// plural returns word + "s" unless n is exactly 1, matching
+// PostgreSQL's interval_out (so -1 pluralises: "-1 years").
+func plural(word string, n int32) string {
+	if n == 1 {
+		return word
+	}
+	return word + "s"
+}
+
+// formatIntervalTime renders the time part of an interval:
+// HH:MM:SS with unclamped hours, a "-" prefix when negative, and a
+// fractional part (trailing zeros trimmed) only when non-zero.
+func formatIntervalTime(microseconds int64) string {
+	neg := microseconds < 0
+	abs := microseconds
+	if neg {
+		abs = -abs
+	}
+	totalSeconds := abs / 1000000
+	frac := abs % 1000000
+	h := totalSeconds / 3600
+	m := (totalSeconds % 3600) / 60
+	s := totalSeconds % 60
+	base := fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+	if neg {
+		base = "-" + base
+	}
+	if frac == 0 {
+		return base
+	}
+	return base + "." + strings.TrimRight(fmt.Sprintf("%06d", frac), "0")
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,5 +175,100 @@ func TestRequestEnvelopeBadProtocol(t *testing.T) {
 	_, _, code := run(t, "--request", req)
 	if code != 2 {
 		t.Fatalf("bad protocol exit = %d, want 2", code)
+	}
+}
+
+func errorCodeOf(t *testing.T, r *result) string {
+	t.Helper()
+	var v map[string]any
+	if err := json.Unmarshal(r.payload, &v); err != nil {
+		t.Fatalf("result payload is not JSON: %v (%q)", err, r.payload)
+	}
+	errObj, _ := v["error"].(map[string]any)
+	code, _ := errObj["code"].(string)
+	return code
+}
+
+func TestClassifyDBErrorTimeout(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want string
+	}{
+		// Statement timeouts get their own code, exit 3.
+		{`ERROR: canceling statement due to statement timeout (SQLSTATE 57014)`, "TIMEOUT"},
+		{"context deadline exceeded", "TIMEOUT"},
+		{"query failed: canceling statement due to statement timeout", "TIMEOUT"},
+		// Connection/dial timeouts are still unreachable.
+		{"dial tcp 10.0.0.1:5432: i/o timeout", "DB_UNREACHABLE"},
+		{"dial tcp 127.0.0.1:1: connect: connection refused", "DB_UNREACHABLE"},
+		{"failed to connect to `host=127.0.0.1 user=ro database=db`: connection refused", "DB_UNREACHABLE"},
+		{"connection refused", "DB_UNREACHABLE"},
+		// Anything else is a generic tool failure.
+		{"something else broke", "TOOL_ERROR"},
+	}
+	for _, c := range cases {
+		r := classifyDBError(errors.New(c.msg))
+		if got := errorCodeOf(t, r); got != c.want {
+			t.Errorf("classifyDBError(%q) code = %q, want %q", c.msg, got, c.want)
+		}
+		if r.exitCode != exitToolFailure {
+			t.Errorf("classifyDBError(%q) exit = %d, want %d", c.msg, r.exitCode, exitToolFailure)
+		}
+	}
+}
+
+func TestGlobalVersionJSONBothOrders(t *testing.T) {
+	wantStdout, _, code := run(t, "version", "--json")
+	if code != 0 {
+		t.Fatalf("version --json exit = %d, want 0", code)
+	}
+	for _, args := range [][]string{
+		{"--version", "--json"},
+		{"--json", "--version"},
+	} {
+		stdout, _, code := run(t, args...)
+		if code != 0 {
+			t.Fatalf("%v exit = %d, want 0", args, code)
+		}
+		if stdout != wantStdout {
+			t.Errorf("%v stdout = %q, want the same JSON as version --json: %q", args, stdout, wantStdout)
+		}
+	}
+}
+
+func TestSampleInvalidSchemaRefused(t *testing.T) {
+	// Refused before connecting, so the DSN can point at a dead port.
+	stdout, _, code := run(t, "sample", "--dsn", "postgres://ro@127.0.0.1:1/db", "--table", "book", "--schema", "bad.name")
+	if code != 1 {
+		t.Fatalf("sample with invalid --schema exit = %d, want 1", code)
+	}
+	var v map[string]any
+	if err := json.Unmarshal([]byte(stdout), &v); err != nil {
+		t.Fatalf("stdout is not JSON: %v", err)
+	}
+	errObj, _ := v["error"].(map[string]any)
+	if errObj["code"] != "QUERY_REFUSED" {
+		t.Errorf("error.code = %v, want QUERY_REFUSED", errObj["code"])
+	}
+}
+
+func TestSampleSchemaViaEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	req := filepath.Join(dir, "req.json")
+	env := `{"protocol":"arabica-plugin-v1","command":"sample","args":{"dsn":"postgres://ro@127.0.0.1:1/db","table":"book","schema":"bad name"}}`
+	if err := os.WriteFile(req, []byte(env), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, code := run(t, "--request", req)
+	if code != 1 {
+		t.Fatalf("--request envelope sample with invalid schema exit = %d, want 1", code)
+	}
+	var v map[string]any
+	if err := json.Unmarshal([]byte(stdout), &v); err != nil {
+		t.Fatalf("stdout is not JSON: %v", err)
+	}
+	errObj, _ := v["error"].(map[string]any)
+	if errObj["code"] != "QUERY_REFUSED" {
+		t.Errorf("error.code = %v, want QUERY_REFUSED", errObj["code"])
 	}
 }

@@ -65,8 +65,25 @@ func TestConvertValue(t *testing.T) {
 		{pgtype.Numeric{Valid: false}, nil},
 		{pgtype.Numeric{NaN: true, Valid: true}, "NaN"},
 		{pgtype.Numeric{InfinityModifier: pgtype.Infinity, Valid: true}, "+Infinity"},
-		{pgtype.Interval{Months: 1, Days: 2, Microseconds: int64(3*time.Second/time.Microsecond) + 500000, Valid: true}, "1 mons 2 days 3.5s"},
+		// Intervals render PostgreSQL-style (years/months/days +
+		// HH:MM:SS), verified against PostgreSQL 16.15's interval_out.
+		{pgtype.Interval{Months: 1, Days: 2, Microseconds: int64(3*time.Second/time.Microsecond) + 500000, Valid: true}, "1 mon 2 days 00:00:03.5"},
+		{pgtype.Interval{Months: 14, Days: 3, Microseconds: int64(4*time.Hour/time.Microsecond) + int64(5*time.Minute/time.Microsecond) + 6789000, Valid: true}, "1 year 2 mons 3 days 04:05:06.789"},
 		{pgtype.Interval{Valid: true}, "00:00:00"},
+		{pgtype.Interval{Microseconds: int64(2*time.Hour/time.Microsecond) + int64(30*time.Minute/time.Microsecond), Valid: true}, "02:30:00"},
+		{pgtype.Interval{Microseconds: int64(25 * time.Hour / time.Microsecond), Valid: true}, "25:00:00"},
+		{pgtype.Interval{Months: 1, Valid: true}, "1 mon"},
+		{pgtype.Interval{Months: 2, Valid: true}, "2 mons"},
+		{pgtype.Interval{Months: 12, Valid: true}, "1 year"},
+		{pgtype.Interval{Months: -14, Valid: true}, "-1 years -2 mons"},
+		{pgtype.Interval{Months: -13, Valid: true}, "-1 years -1 mons"},
+		{pgtype.Interval{Days: 1, Microseconds: -int64(2 * time.Hour / time.Microsecond), Valid: true}, "1 day -02:00:00"},
+		{pgtype.Interval{Days: -1, Microseconds: -int64(2 * time.Hour / time.Microsecond), Valid: true}, "-1 days -02:00:00"},
+		{pgtype.Interval{Microseconds: 500000, Valid: true}, "00:00:00.5"},
+		{pgtype.Interval{Microseconds: -500000, Valid: true}, "-00:00:00.5"},
+		{pgtype.Interval{Microseconds: -int64(30 * time.Minute / time.Microsecond), Valid: true}, "-00:30:00"},
+		{pgtype.Interval{Microseconds: -int64(90 * time.Minute / time.Microsecond), Valid: true}, "-01:30:00"},
+		{pgtype.Interval{Microseconds: 1, Valid: true}, "00:00:00.000001"},
 		{pgtype.Interval{Valid: false}, nil},
 		// pgx decodes json/jsonb objects as map[string]any: the structure
 		// must survive, not become a "map[...]" string.

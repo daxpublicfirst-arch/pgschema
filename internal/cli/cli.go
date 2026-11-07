@@ -232,11 +232,31 @@ func dbUnreachableError(blocked string) *result {
 	}
 }
 
+// timeoutError is a statement timeout: the server killed the statement
+// after statement_timeout (30s), or the 30s client context expired.
+// That is not a connection problem, so it gets its own code (exit 3).
+func timeoutError(blocked string) *result {
+	return &result{
+		command:  "unknown",
+		payload:  errPayload("TIMEOUT", blocked, "The statement hit the 30s statement_timeout: narrow the query (add a filter or LIMIT, or sample a smaller table) and retry.", "If the query is genuinely long-running, run it outside pgschema (e.g. psql) — the 30s limit is fixed by the plugin contract."),
+		exitCode: exitToolFailure,
+		ok:       false,
+	}
+}
+
 // classifyDBError turns a connection/describe error into the right
-// result: DB_UNREACHABLE for connection problems, TOOL_ERROR otherwise.
+// result: TIMEOUT for a statement timeout, DB_UNREACHABLE for connection
+// problems, TOOL_ERROR otherwise. A statement timeout must be checked
+// first: its message contains "timeout", which on its own means a
+// connection problem, but "statement timeout" / "context deadline
+// exceeded" mean the query ran too long on a live connection.
 func classifyDBError(err error) *result {
 	msg := err.Error()
 	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "statement timeout") ||
+		strings.Contains(lower, "context deadline exceeded") {
+		return timeoutError(msg)
+	}
 	for _, frag := range []string{
 		"connect", "connection refused", "no such host", "dial",
 		"timeout", "timed out", "network is unreachable",
@@ -264,7 +284,15 @@ func dispatch(argv []string) *result {
 	var requestPath, requestCommand string
 	var requestArgs map[string]any
 	var requestBytes int
+	// Pre-scan for --json: it may come after --version
+	// (`pgschema --version --json`), and the loop below returns at
+	// --version before it would see a later --json.
 	globalJSON := false
+	for _, a := range argv {
+		if a == "--json" {
+			globalJSON = true
+		}
+	}
 	rest := []string{}
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
@@ -361,7 +389,7 @@ func runCommand(cmd string, args []string, globalJSON bool, envArgs map[string]a
 		applyEnvelope(fs, envArgs)
 		return queryResult(fs, globalJSON, inputBytes)
 	case "sample":
-		fs, out := parseFlags(cmd, args, []string{"dsn", "table", "limit", "order", "out", "json"}, 20)
+		fs, out := parseFlags(cmd, args, []string{"dsn", "schema", "table", "limit", "order", "out", "json"}, 20)
 		if fs == nil {
 			return out
 		}
@@ -486,15 +514,19 @@ func applyEnvelope(fs *flagSet, envArgs map[string]any) {
 	}
 	if v, ok := get("dsn"); ok {
 		fs.dsn = v
+		fs.set["dsn"] = true
 	}
 	if v, ok := get("schema"); ok {
 		fs.schema = v
+		fs.set["schema"] = true
 	}
 	if v, ok := get("out"); ok {
 		fs.out = v
+		fs.set["out"] = true
 	}
 	if v, ok := get("sql"); ok {
 		fs.sql = v
+		fs.set["sql"] = true
 	}
 	if v, ok := get("limit"); ok {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -504,18 +536,23 @@ func applyEnvelope(fs *flagSet, envArgs map[string]any) {
 	}
 	if v, ok := get("table"); ok {
 		fs.table = v
+		fs.set["table"] = true
 	}
 	if v, ok := get("order"); ok {
 		fs.order = v
+		fs.set["order"] = true
 	}
 	if v, ok := get("a"); ok {
 		fs.a = v
+		fs.set["a"] = true
 	}
 	if v, ok := get("b"); ok {
 		fs.b = v
+		fs.set["b"] = true
 	}
 	if v, ok := get("json"); ok {
 		fs.json = v == "true"
+		fs.set["json"] = true
 	}
 }
 
@@ -562,7 +599,7 @@ func helpResult(_ string) *result {
 Usage:
   pgschema describe --dsn <dsn> [--schema public] [--out <dir>] [--json]
   pgschema query --dsn <dsn> --sql "select ..." [--limit 100] [--out <dir>] [--json]
-  pgschema sample --dsn <dsn> --table <name> [--limit 20] [--order <expr>] [--out <dir>] [--json]
+  pgschema sample --dsn <dsn> --table <name> [--schema <name>] [--limit 20] [--order <expr>] [--out <dir>] [--json]
   pgschema diff --a <dsn> --b <dsn> [--schema public] [--out <dir>] [--json]
   pgschema self-test [--fixtures <dir>]
   pgschema doctor [--dsn <dsn>]
@@ -687,6 +724,18 @@ func sampleResult(fs *flagSet, globalJSON bool, inputBytes int) *result {
 		r.inputBytes = inputBytes
 		return withCommand(r, "sample")
 	}
+	// --schema is optional: only when it was given (flag or envelope)
+	// is the table qualified as "schema"."table". The flag's default
+	// is "public", so the set map — not the value — decides.
+	schema := ""
+	if fs.set["schema"] {
+		schema = fs.schema
+		if err := pg.ValidateSchemaName(schema); err != nil {
+			r := queryRefusedError(err.Error())
+			r.inputBytes = inputBytes
+			return withCommand(r, "sample")
+		}
+	}
 	if err := pg.ValidateOrderBy(fs.order); err != nil {
 		r := queryRefusedError(err.Error())
 		r.inputBytes = inputBytes
@@ -701,7 +750,7 @@ func sampleResult(fs *flagSet, globalJSON bool, inputBytes int) *result {
 		return withCommand(r, "sample")
 	}
 	defer conn.Close(ctx)
-	sr, err := pg.Sample(ctx, conn, fs.table, fs.limit, fs.order)
+	sr, err := pg.Sample(ctx, conn, schema, fs.table, fs.limit, fs.order)
 	if err != nil {
 		if pg.IsRefused(err) {
 			r := queryRefusedError(err.Error())

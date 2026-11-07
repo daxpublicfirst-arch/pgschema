@@ -177,7 +177,7 @@ func SelfTest(ctx context.Context, testDSN, fixturesDir string) ([]SelfTestCheck
 	}
 
 	// sample (ordered, so the rows are deterministic)
-	sr, err := Sample(ctx, ro, "book", 20, "id")
+	sr, err := Sample(ctx, ro, "", "book", 20, "id")
 	if err != nil {
 		fail("sample", err.Error())
 	} else {
@@ -220,12 +220,12 @@ func SelfTest(ctx context.Context, testDSN, fixturesDir string) ([]SelfTestCheck
 			fail(r.name, "statement was not refused: "+r.sql)
 		}
 	}
-	if _, err := Sample(ctx, ro, "book.x", 20, ""); err != nil {
+	if _, err := Sample(ctx, ro, "", "book.x", 20, ""); err != nil {
 		pass("refuse-bad-identifier")
 	} else {
 		fail("refuse-bad-identifier", "sample accepted table name \"book.x\"")
 	}
-	if _, err := Sample(ctx, ro, "book", 20, "id; DROP TABLE book"); err != nil {
+	if _, err := Sample(ctx, ro, "", "book", 20, "id; DROP TABLE book"); err != nil {
 		pass("refuse-bad-order")
 	} else {
 		fail("refuse-bad-order", "sample accepted --order \"id; DROP TABLE book\"")

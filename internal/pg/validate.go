@@ -157,6 +157,22 @@ func ValidateIdentifier(name string) error {
 	return nil
 }
 
+// ValidateSchemaName rejects any --schema value that is not a plain,
+// unqualified identifier, using the same rule as ValidateIdentifier so
+// it can be safely quoted into a query as "schema"."table".
+func ValidateSchemaName(name string) error {
+	if name == "" {
+		return refused("schema name must not be empty")
+	}
+	if !identifierRe.MatchString(name) {
+		return refused("invalid schema name %q: use a plain identifier without a dot, quote, semicolon or whitespace", name)
+	}
+	if len(name) > 63 {
+		return refused("invalid schema name %q: identifiers are at most 63 characters", name)
+	}
+	return nil
+}
+
 // orderByPartRe allows one ORDER BY item: a plain column name with an
 // optional ASC or DESC.
 var orderByPartRe = regexp.MustCompile(`(?i)^[A-Za-z_][A-Za-z0-9_]*(\s+(ASC|DESC))?$`)
