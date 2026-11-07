@@ -1,0 +1,12 @@
+name = "pgschema"
+version = "0.1.0"
+kind = "cli"
+entry = "bin/pgschema"
+protocol = "arabica-plugin-v1"
+commands = ["describe", "query", "sample", "diff", "self-test", "doctor", "version"]
+about = "Inspect a PostgreSQL schema read-only: tables, columns, keys, a safe query, a sample, and a schema diff."
+example = "pgschema describe --dsn 'postgres://ro@127.0.0.1:5432/db?sslmode=disable' --json"
+permissions = { read = ["--dsn"], write = ["--out"], network = true }
+limits = { input_mb = 10, timeout_s = 30 }
+license = "MIT"
+source = "https://github.com/daxpublicfirst-arch/pgschema"
