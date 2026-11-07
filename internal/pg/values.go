@@ -2,6 +2,7 @@ package pg
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/big"
@@ -17,8 +18,15 @@ import (
 // convertValue turns a pgx-decoded row value into a JSON-friendly value:
 // numbers stay numbers, NULL stays null, booleans stay booleans, strings
 // stay strings, timestamps become RFC 3339 strings, bytea becomes a hex
-// string, and anything else becomes its string form. Arrays are converted
+// string, JSON objects stay objects, UUIDs become their canonical string
+// form, and anything else becomes its string form. Arrays are converted
 // element by element.
+//
+// NOTE: when pgx scans into `any`, several types do NOT arrive as the
+// pgtype struct the name suggests: uuid arrives as [16]byte, date arrives
+// as time.Time (see collectRows, which formats it by OID), and json/jsonb
+// arrive as map[string]any / []any. The cases below handle the types pgx
+// actually produces, not just the pgtype structs.
 func convertValue(v any) any {
 	switch t := v.(type) {
 	case nil:
@@ -49,6 +57,9 @@ func convertValue(v any) any {
 		return t.Format(time.RFC3339Nano)
 	case []byte:
 		return hex.EncodeToString(t)
+	case [16]byte:
+		// pgx decodes uuid into [16]byte when scanning into any.
+		return formatUUID(t)
 	case pgtype.Numeric:
 		return numericValue(t)
 	case pgtype.Date:
@@ -66,6 +77,11 @@ func convertValue(v any) any {
 			return nil
 		}
 		return t.Time.Format(time.RFC3339Nano)
+	case pgtype.Time:
+		if !t.Valid {
+			return nil
+		}
+		return formatTimeOfDay(t.Microseconds)
 	case pgtype.UUID:
 		if !t.Valid {
 			return nil
@@ -98,6 +114,26 @@ func convertValue(v any) any {
 		return out
 	}
 
+	// JSON objects (json/jsonb) come back as maps; convert each value so
+	// nested objects and arrays keep their structure instead of being
+	// flattened by fmt.Sprintf("%v").
+	if rv.IsValid() && rv.Kind() == reflect.Map {
+		out := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			out[fmt.Sprintf("%v", iter.Key().Interface())] = convertValue(iter.Value().Interface())
+		}
+		return out
+	}
+
+	// Pointers (e.g. *string inside a decoded map): dereference, nil stays nil.
+	if rv.IsValid() && rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return nil
+		}
+		return convertValue(rv.Elem().Interface())
+	}
+
 	// Last resort: a String() method, otherwise %v.
 	if s, ok := v.(fmt.Stringer); ok {
 		return s.String()
@@ -118,9 +154,14 @@ func floatOrString(f float64) any {
 	return f
 }
 
-// numericValue renders a pgtype.Numeric as a JSON number when it is finite,
-// and as a string ("NaN", "Infinity", "-Infinity") when it is not, because
-// JSON has no representation for those.
+// numericValue renders a pgtype.Numeric as an exact JSON number when it
+// is finite, and as a string ("NaN", "Infinity", "-Infinity") when it is
+// not, because JSON has no representation for those. It returns
+// json.Number, not float64: converting through float64 silently rounds
+// values with more than ~15 significant digits (e.g. numeric(32,2)
+// 123456789012345678901234567890.12 became 1.2345678901234568e+29).
+// json.Number is emitted verbatim by encoding/json, so the JSON output
+// keeps the exact decimal digits.
 func numericValue(n pgtype.Numeric) any {
 	if !n.Valid {
 		return nil
@@ -137,25 +178,58 @@ func numericValue(n pgtype.Numeric) any {
 	if n.Int == nil {
 		return nil
 	}
-	// value = Int * 10^Exp
-	f := new(big.Float).SetInt(n.Int)
-	if n.Exp != 0 {
-		scale := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(abs32(n.Exp))), nil))
-		if n.Exp > 0 {
-			f.Mul(f, scale)
-		} else {
-			f.Quo(f, scale)
-		}
-	}
-	out, _ := f.Float64()
-	return out
+	return json.Number(numericString(n.Int, n.Exp))
 }
 
-func abs32(v int32) int32 {
-	if v < 0 {
-		return -v
+// numericString renders value = digits * 10^exp as an exact decimal
+// string, with no trailing zeros in the fraction and no exponent.
+func numericString(digits *big.Int, exp int32) string {
+	s := digits.String()
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
 	}
-	return v
+	prefix := ""
+	if neg {
+		prefix = "-"
+	}
+	if s == "0" {
+		return "0"
+	}
+	if exp >= 0 {
+		return prefix + s + strings.Repeat("0", int(exp))
+	}
+	point := int(-exp)
+	if len(s) > point {
+		intPart := s[:len(s)-point]
+		fracPart := strings.TrimRight(s[len(s)-point:], "0")
+		if fracPart == "" {
+			return prefix + intPart
+		}
+		return prefix + intPart + "." + fracPart
+	}
+	fracPart := strings.TrimRight(strings.Repeat("0", point-len(s))+s, "0")
+	if fracPart == "" {
+		return "0"
+	}
+	return prefix + "0." + fracPart
+}
+
+// formatTimeOfDay renders a PostgreSQL time (microseconds since midnight)
+// as "HH:MM:SS" with a fractional part only when needed. 24:00:00 is kept
+// as 24:00:00 rather than rolling over to the next day.
+func formatTimeOfDay(microseconds int64) string {
+	us := microseconds % 1000000
+	totalSeconds := microseconds / 1000000
+	h := totalSeconds / 3600
+	m := (totalSeconds % 3600) / 60
+	s := totalSeconds % 60
+	base := fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+	if us == 0 {
+		return base
+	}
+	frac := strings.TrimRight(fmt.Sprintf("%06d", us), "0")
+	return base + "." + frac
 }
 
 func formatUUID(b [16]byte) string {

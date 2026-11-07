@@ -2,8 +2,10 @@ package pg
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // QueryResult is the JSON payload of the `query` command.
@@ -55,8 +57,9 @@ func RunQuery(ctx context.Context, conn *pgx.Conn, sql string, limit int) (*Quer
 // collectRows reads rows from an open pgx.Rows, collecting at most limit
 // of them. It peeks one row further to set Truncated.
 func collectRows(rows pgx.Rows, limit int) (*QueryResult, error) {
+	fds := rows.FieldDescriptions()
 	columns := []string{}
-	for _, fd := range rows.FieldDescriptions() {
+	for _, fd := range fds {
 		columns = append(columns, fd.Name)
 	}
 	result := &QueryResult{
@@ -75,7 +78,17 @@ func collectRows(rows pgx.Rows, limit int) (*QueryResult, error) {
 		}
 		row := make(map[string]any, len(columns))
 		for i, col := range columns {
-			row[col] = convertValue(vals[i])
+			v := vals[i]
+			// pgx decodes a date column as time.Time (midnight UTC) when
+			// scanning into any, which convertValue would render as an
+			// RFC 3339 timestamp. A date is not a timestamp: format it
+			// as a plain date using the column's type OID.
+			if fds[i].DataTypeOID == pgtype.DateOID {
+				if t, ok := v.(time.Time); ok {
+					v = t.Format("2006-01-02")
+				}
+			}
+			row[col] = convertValue(v)
 		}
 		result.Rows = append(result.Rows, row)
 	}
